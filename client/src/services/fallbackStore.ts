@@ -178,25 +178,55 @@ export const fallbackStore = {
     const orders = this.getOrders();
     const orderNum = orders.length + 1001;
     const now = new Date().toISOString();
+
+    let calcSubtotal = 0;
+    const items = (orderData.items || []).map((it: any) => {
+      const qty = Number(it.quantity || it.qty || 1);
+      const price = Number(it.unit_price || it.price || 0);
+      const total = Number(it.total_price || (price * qty));
+      calcSubtotal += total;
+      return {
+        product_id: it.product_id || it.id || '',
+        product_name: it.product_name || it.name || '',
+        unit_price: price,
+        quantity: qty,
+        total_price: total,
+        notes: it.notes || '',
+      };
+    });
+
+    const subtotal = (orderData.subtotal !== undefined && Number(orderData.subtotal) > 0)
+      ? Number(orderData.subtotal)
+      : calcSubtotal;
+    const discount = Number(orderData.discount || 0);
+    const taxable = Math.max(0, subtotal - discount);
+    const taxRate = Number(orderData.tax_rate) || 13;
+    const taxAmount = (orderData.tax_amount !== undefined && Number(orderData.tax_amount) > 0)
+      ? Number(orderData.tax_amount)
+      : Math.round(taxable * (taxRate / 100));
+    const grandTotal = (orderData.grand_total !== undefined && Number(orderData.grand_total) > 0)
+      ? Number(orderData.grand_total)
+      : taxable + taxAmount;
+
     const newOrder: Order = {
       id: 'ord-' + Date.now(),
       order_number: orderNum,
       order_type: orderData.order_type || 'dine_in',
       table_number: orderData.table_number || null,
-      status: 'pending',
-      subtotal: orderData.subtotal || 0,
-      discount: orderData.discount || 0,
+      status: orderData.status || 'pending',
+      subtotal,
+      discount,
       discount_type: orderData.discount_type || 'fixed',
       discount_value: orderData.discount_value || 0,
-      tax_rate: orderData.tax_rate || 13,
-      tax_amount: orderData.tax_amount || 0,
-      grand_total: orderData.grand_total || 0,
+      tax_rate: taxRate,
+      tax_amount: taxAmount,
+      grand_total: grandTotal,
       cashier_name: orderData.cashier_name || 'Staff',
       customer_name: orderData.customer_name || 'Guest',
       notes: orderData.notes || '',
       created_at: now,
       updated_at: now,
-      items: orderData.items || [],
+      items,
     };
     orders.unshift(newOrder);
     setStored(STORAGE_KEY_ORDERS, orders);
@@ -228,11 +258,39 @@ export const fallbackStore = {
     let targetOrder: Order;
     const orders = this.getOrders();
 
+    const paidSubtotal = Number(payload.subtotal) || 0;
+    const paidDiscount = Number(payload.discount) || 0;
+    const paidTaxRate = Number(payload.tax_rate) || 13;
+    const paidTaxAmount = Number(payload.tax_amount) || 0;
+    const paidGrandTotal = Number(payload.grand_total) || 0;
+    const paidReceived = Number(payload.received_amount) || paidGrandTotal;
+    const changeGiven = Math.max(0, paidReceived - paidGrandTotal);
+    const txnRef = payload.transaction_ref || ('CSH-' + Date.now().toString().slice(-4));
+    const now = new Date().toISOString();
+
     if (payload.order_id) {
       const existing = orders.find(o => o.id === payload.order_id);
       if (!existing) throw new Error('Order not found');
       existing.status = 'completed';
-      existing.updated_at = new Date().toISOString();
+      if (paidSubtotal > 0) existing.subtotal = paidSubtotal;
+      existing.discount = paidDiscount;
+      existing.tax_rate = paidTaxRate;
+      if (paidTaxAmount > 0) existing.tax_amount = paidTaxAmount;
+      if (paidGrandTotal > 0) existing.grand_total = paidGrandTotal;
+      if (payload.cashier_name) existing.cashier_name = payload.cashier_name;
+      existing.updated_at = now;
+      existing.payment_method = payload.payment_method || 'cash';
+      existing.payments = [{
+        id: 'pay-' + Date.now(),
+        order_id: existing.id,
+        payment_method: payload.payment_method || 'cash',
+        amount_paid: existing.grand_total,
+        received_amount: paidReceived,
+        change_given: changeGiven,
+        transaction_ref: txnRef,
+        cashier_name: payload.cashier_name || 'Staff',
+        created_at: now,
+      }];
       targetOrder = existing;
     } else {
       targetOrder = this.createOrder({
@@ -240,6 +298,18 @@ export const fallbackStore = {
         status: 'completed',
       });
       targetOrder.status = 'completed';
+      targetOrder.payment_method = payload.payment_method || 'cash';
+      targetOrder.payments = [{
+        id: 'pay-' + Date.now(),
+        order_id: targetOrder.id,
+        payment_method: payload.payment_method || 'cash',
+        amount_paid: targetOrder.grand_total,
+        received_amount: paidReceived,
+        change_given: changeGiven,
+        transaction_ref: txnRef,
+        cashier_name: payload.cashier_name || 'Staff',
+        created_at: now,
+      }];
     }
 
     setStored(STORAGE_KEY_ORDERS, orders);

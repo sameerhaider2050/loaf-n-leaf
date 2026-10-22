@@ -78,6 +78,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ settings }) => {
   const handleReprint = async (order: Order) => {
     try {
       const full = await api.getOrder(order.id);
+      const calcSubtotal = full.subtotal > 0 ? full.subtotal : (full.items || []).reduce((s: number, it: any) => s + (Number(it.unit_price) * Number(it.quantity)), 0);
+      const calcTaxRate = Number(full.tax_rate) || 13;
+      const calcTax = full.tax_amount > 0 ? full.tax_amount : Math.round(calcSubtotal * (calcTaxRate / 100));
+      const calcGrandTotal = full.grand_total > 0 ? full.grand_total : Math.max(0, calcSubtotal + calcTax - (Number(full.discount) || 0));
+      const isPaid = (full.payments && full.payments.length > 0) || full.status === 'completed';
+      const payMethod = full.payments && full.payments.length > 0 ? full.payments[0].payment_method.toUpperCase() : (isPaid ? 'CASH' : 'PENDING');
+
       const receiptData: ReceiptData = {
         restaurant: {
           name: settings.restaurant_name || 'Loaf n Leaf',
@@ -103,15 +110,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ settings }) => {
           total: it.total_price,
         })),
         summary: {
-          subtotal: full.subtotal,
-          discount: full.discount,
-          tax_rate: full.tax_rate,
-          tax_amount: full.tax_amount,
-          grand_total: full.grand_total,
-          payment_method: full.payments && full.payments.length > 0 ? full.payments[0].payment_method.toUpperCase() : 'PENDING',
-          received_amount: full.payments && full.payments.length > 0 ? full.payments[0].received_amount : full.grand_total,
+          subtotal: calcSubtotal,
+          discount: full.discount || 0,
+          tax_rate: calcTaxRate,
+          tax_amount: calcTax,
+          grand_total: calcGrandTotal,
+          payment_method: payMethod,
+          received_amount: full.payments && full.payments.length > 0 ? full.payments[0].received_amount : calcGrandTotal,
           change_given: full.payments && full.payments.length > 0 ? full.payments[0].change_given : 0,
-          transaction_ref: full.payments && full.payments.length > 0 ? (full.payments[0].transaction_ref || '') : '',
+          transaction_ref: full.payments && full.payments.length > 0 ? (full.payments[0].transaction_ref || '') : (isPaid ? 'CSH-' + full.order_number : ''),
         },
       };
       setReceiptToPrint(receiptData);

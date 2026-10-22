@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { PaymentMethod, ReceiptData } from '../types';
 import { formatCurrency } from '../utils/formatters';
+import { api } from '../services/api';
 
 interface CheckoutModalProps {
   isOpen: boolean;
@@ -117,18 +118,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         client_token: clientToken,
       };
 
-      const res = await fetch('/api/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Payment failed to process');
-      }
-
-      onPaymentComplete(data.data.receipt);
+      const result = await api.checkout(payload);
+      onPaymentComplete(result.receipt);
     } catch (err: any) {
       console.error('Payment checkout failed:', err);
       setErrorMessage(err.message || 'Payment processing failed. Please try again.');
