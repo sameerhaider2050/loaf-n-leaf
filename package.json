@@ -1,0 +1,28 @@
+{
+  "name": "loaf-n-leaf",
+  "version": "1.0.0",
+  "description": "Artisan Restaurant Management & Digital Menu System for Loaf n Leaf",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "node dev.js",
+    "server": "node server/index.js",
+    "client": "npm --prefix client run dev",
+    "build": "npm --prefix client install && npm --prefix client run build && node -e \"const fs=require('fs'); fs.cpSync('client/dist', 'dist', {recursive:true});\"",
+    "start": "node server/index.js"
+  },
+  "keywords": [
+    "restaurant",
+    "retail",
+    "management",
+    "dining"
+  ],
+  "author": "Loaf n Leaf Product Team",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "sql.js": "^1.15.1"
+  }
+}
