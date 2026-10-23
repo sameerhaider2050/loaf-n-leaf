@@ -336,6 +336,7 @@ function ensureDefaultUsers() {
 
 function seedInitialData() {
   console.log('Seeding initial restaurant data for Loaf n Leaf...');
+  const now = new Date().toISOString();
 
   // Categories
   const categories = [

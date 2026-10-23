@@ -489,6 +489,30 @@ export const api = {
     }
   },
 
+  async ownerAuthorizeTerminal(payload: {
+    adminIdentifier?: string;
+    adminPassword?: string;
+    adminPin?: string;
+    deviceFingerprint: string;
+    publicKeySpki: string;
+    challengeId: string;
+    signature: string;
+    rolesToAuthorize?: string[];
+    deviceName?: string;
+  }): Promise<{ user: User; sessionToken: string; device: any }> {
+    return await request<{ user: User; sessionToken: string; device: any }>('/device/owner-authorize-terminal', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async devAuthorizeLocalTerminal(deviceFingerprint: string, deviceName?: string): Promise<{ success: boolean; message: string; permittedRoles: string[] }> {
+    return await request<{ success: boolean; message: string; permittedRoles: string[] }>('/device/dev/authorize-local-terminal', {
+      method: 'POST',
+      body: JSON.stringify({ deviceFingerprint, deviceName }),
+    });
+  },
+
   // Admin Device Management
   async getAdminDevices(): Promise<AuthorizedDevice[]> {
     try {

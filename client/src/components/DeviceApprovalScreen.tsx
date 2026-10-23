@@ -11,7 +11,10 @@ import {
   Lock, 
   ArrowLeft,
   Info,
-  Server
+  Server,
+  KeyRound,
+  ShieldCheck,
+  Zap
 } from 'lucide-react';
 import { api } from '../services/api';
 import { deviceCrypto, getDevicePlatformInfo } from '../services/deviceCrypto';
@@ -46,6 +49,18 @@ export const DeviceApprovalScreen: React.FC<DeviceApprovalScreenProps> = ({
   const [notes, setNotes] = useState<string>('');
   const [feedback, setFeedback] = useState<string | null>(null);
 
+  // Owner / Admin Elevation State
+  const [isElevating, setIsElevating] = useState<boolean>(false);
+  const [elevationMode, setElevationMode] = useState<'pin' | 'credentials'>('pin');
+  const [adminPinInput, setAdminPinInput] = useState<string>('');
+  const [adminIdentInput, setAdminIdentInput] = useState<string>('admin');
+  const [adminPassInput, setAdminPassInput] = useState<string>('');
+  const [rolesToGrant, setRolesToGrant] = useState<string[]>(['admin', 'cashier', 'order_taker']);
+  const [devLoading, setDevLoading] = useState<boolean>(false);
+
+  const isLocalHost = typeof window !== 'undefined' && 
+    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
   const platformInfo = getDevicePlatformInfo();
 
   // Check device status periodically or manually
@@ -69,6 +84,86 @@ export const DeviceApprovalScreen: React.FC<DeviceApprovalScreenProps> = ({
       console.error('Failed to check device status:', err);
     } finally {
       setIsChecking(false);
+    }
+  };
+
+  // Owner / Admin Elevation Handler
+  const handleOwnerAuthorize = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      setIsElevating(true);
+      setFeedback(null);
+
+      // 1. Get challenge nonce
+      const challenge = await api.getDeviceChallenge(deviceFingerprint);
+
+      // 2. Cryptographically sign challenge nonce with private key
+      const signature = await deviceCrypto.signChallenge(challenge.nonce);
+      const { identity } = await deviceCrypto.getOrCreateDeviceIdentity();
+
+      // 3. Post to owner-authorize-terminal
+      const payload: any = {
+        deviceFingerprint,
+        publicKeySpki: identity.publicKeySpki,
+        challengeId: challenge.challengeId,
+        signature,
+        rolesToAuthorize: rolesToGrant,
+        deviceName: deviceName.trim() || undefined,
+      };
+
+      if (elevationMode === 'pin') {
+        if (!adminPinInput.trim()) {
+          setFeedback('Please enter the administrator PIN');
+          setIsElevating(false);
+          return;
+        }
+        payload.adminPin = adminPinInput.trim();
+      } else {
+        if (!adminIdentInput.trim() || !adminPassInput.trim()) {
+          setFeedback('Please enter administrator username and password');
+          setIsElevating(false);
+          return;
+        }
+        payload.adminIdentifier = adminIdentInput.trim();
+        payload.adminPassword = adminPassInput.trim();
+      }
+
+      const res = await api.ownerAuthorizeTerminal(payload);
+
+      // Store approved session
+      deviceCrypto.saveSession({
+        sessionToken: res.sessionToken,
+        deviceId: res.device.id,
+        deviceName: res.device.name,
+        permittedRoles: res.device.permittedRoles,
+        user: res.user,
+        savedAt: new Date().toISOString(),
+      });
+
+      setFeedback(`Terminal authorized for Administrator access by ${res.user.name}! Opening Admin Dashboard...`);
+      setTimeout(() => {
+        onApproved();
+      }, 1000);
+    } catch (err: any) {
+      setFeedback(err.message || 'Authorization failed. Please verify administrator credentials.');
+    } finally {
+      setIsElevating(false);
+    }
+  };
+
+  // Dev-Only Helper
+  const handleDevAuthorize = async () => {
+    try {
+      setDevLoading(true);
+      const res = await api.devAuthorizeLocalTerminal(deviceFingerprint, deviceName);
+      setFeedback(res.message + ' Please wait while session refreshes...');
+      setTimeout(() => {
+        checkStatus();
+      }, 1000);
+    } catch (err: any) {
+      setFeedback(err.message || 'Dev authorization failed');
+    } finally {
+      setDevLoading(false);
     }
   };
 
@@ -175,6 +270,158 @@ export const DeviceApprovalScreen: React.FC<DeviceApprovalScreenProps> = ({
           {feedback && (
             <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-lg font-medium">
               {feedback}
+            </div>
+          )}
+
+          {/* Owner / Administrator Role Authorization Section */}
+          {(currentStatus === 'role_mismatch' || userRole === 'admin') && (
+            <div className="bg-gradient-to-br from-[#FAFBF9] to-leaf-50/50 border border-leaf-300 rounded-xl p-4 space-y-3.5 shadow-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-leaf-950 uppercase tracking-wider flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-leaf-700" />
+                  Owner / Administrator Authorization
+                </span>
+                <span className="text-[10px] font-semibold bg-leaf-200/70 text-leaf-900 px-2 py-0.5 rounded-full">
+                  Admin Control
+                </span>
+              </div>
+
+              <p className="text-xs text-secondary-text leading-relaxed">
+                If you are the restaurant owner or an authorized administrator, authenticate below to authorize this terminal for <strong>Administrator access</strong>.
+              </p>
+
+              <form onSubmit={handleOwnerAuthorize} className="space-y-3">
+                <div className="flex gap-2 p-1 bg-leaf-100/70 rounded-lg text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setElevationMode('pin')}
+                    className={`flex-1 py-1 font-semibold rounded-md transition-colors ${
+                      elevationMode === 'pin' ? 'bg-white text-leaf-950 shadow-xs' : 'text-leaf-800 hover:text-leaf-950'
+                    }`}
+                  >
+                    Quick Admin PIN
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setElevationMode('credentials')}
+                    className={`flex-1 py-1 font-semibold rounded-md transition-colors ${
+                      elevationMode === 'credentials' ? 'bg-white text-leaf-950 shadow-xs' : 'text-leaf-800 hover:text-leaf-950'
+                    }`}
+                  >
+                    Admin Password
+                  </button>
+                </div>
+
+                {elevationMode === 'pin' ? (
+                  <div>
+                    <label className="block text-[11px] font-semibold text-leaf-900 mb-1">
+                      Administrator Master PIN
+                    </label>
+                    <input
+                      type="password"
+                      value={adminPinInput}
+                      onChange={(e) => setAdminPinInput(e.target.value)}
+                      placeholder="Enter Admin PIN (e.g. 2007 or 1234)"
+                      maxLength={10}
+                      className="w-full px-3 py-2 text-xs border border-leaf-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-leaf-600 bg-white"
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-leaf-900 mb-1">
+                        Admin Username / Email
+                      </label>
+                      <input
+                        type="text"
+                        value={adminIdentInput}
+                        onChange={(e) => setAdminIdentInput(e.target.value)}
+                        placeholder="admin"
+                        className="w-full px-3 py-2 text-xs border border-leaf-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-leaf-600 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-leaf-900 mb-1">
+                        Admin Password
+                      </label>
+                      <input
+                        type="password"
+                        value={adminPassInput}
+                        onChange={(e) => setAdminPassInput(e.target.value)}
+                        placeholder="Enter admin password (e.g. admin123)"
+                        className="w-full px-3 py-2 text-xs border border-leaf-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-leaf-600 bg-white"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Roles to Grant */}
+                <div>
+                  <label className="block text-[11px] font-semibold text-leaf-900 mb-1.5">
+                    Permitted Roles for this Terminal:
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'admin', label: 'Admin' },
+                      { id: 'cashier', label: 'Cashier' },
+                      { id: 'order_taker', label: 'Waiter' },
+                    ].map((role) => (
+                      <label
+                        key={role.id}
+                        className={`flex items-center gap-1.5 p-2 rounded-lg border text-xs cursor-pointer select-none transition-colors ${
+                          rolesToGrant.includes(role.id)
+                            ? 'bg-leaf-800 text-white border-leaf-800 font-semibold'
+                            : 'bg-white text-leaf-900 border-leaf-200 hover:bg-leaf-50'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={rolesToGrant.includes(role.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setRolesToGrant([...rolesToGrant, role.id]);
+                            } else {
+                              if (rolesToGrant.length > 1) {
+                                setRolesToGrant(rolesToGrant.filter((r) => r !== role.id));
+                              }
+                            }
+                          }}
+                          className="sr-only"
+                        />
+                        <CheckCircle2 className={`w-3.5 h-3.5 ${rolesToGrant.includes(role.id) ? 'text-white' : 'text-gray-300'}`} />
+                        <span>{role.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isElevating}
+                  className="w-full py-2.5 bg-leaf-800 hover:bg-leaf-900 text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <KeyRound className="w-4 h-4 text-wheat-300" />
+                  {isElevating ? 'Verifying Admin Signature...' : 'Authorize Terminal for Admin Access'}
+                </button>
+              </form>
+
+              {/* Development-Only Local Helper */}
+              {isLocalHost && (
+                <div className="pt-2 border-t border-leaf-200/80 flex items-center justify-between">
+                  <span className="text-[11px] text-leaf-700 font-medium flex items-center gap-1">
+                    <Zap className="w-3.5 h-3.5 text-amber-600" />
+                    Dev Mode (Localhost):
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleDevAuthorize}
+                    disabled={devLoading}
+                    className="px-2.5 py-1 text-[11px] bg-amber-100 hover:bg-amber-200 text-amber-900 font-semibold rounded-lg transition-colors border border-amber-300 disabled:opacity-60"
+                  >
+                    {devLoading ? 'Authorizing...' : '⚡ 1-Click Authorize All Roles'}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

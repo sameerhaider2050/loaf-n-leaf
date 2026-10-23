@@ -346,6 +346,251 @@ router.post('/verify-and-login', async (req, res) => {
 });
 
 // -------------------------------------------------------------
+// 2b. POST /api/device/owner-authorize-terminal
+// Owner / Administrator workflow to elevate or authorize roles on a terminal
+// Requires verified Admin credentials + cryptographic device proof
+// -------------------------------------------------------------
+router.post('/owner-authorize-terminal', async (req, res) => {
+  try {
+    const {
+      adminIdentifier,
+      adminPassword,
+      adminPin,
+      deviceFingerprint,
+      publicKeySpki,
+      challengeId,
+      signature,
+      rolesToAuthorize,
+      deviceName,
+    } = req.body;
+
+    // 1. Validate cryptographic challenge
+    if (!challengeId || !challengeStore.has(challengeId)) {
+      return res.status(400).json({
+        success: false,
+        code: 'CHALLENGE_EXPIRED',
+        error: 'Authentication challenge expired or invalid. Please retry.',
+      });
+    }
+
+    const challenge = challengeStore.get(challengeId);
+    challengeStore.delete(challengeId);
+
+    if (challenge.fingerprint !== deviceFingerprint) {
+      return res.status(400).json({ success: false, error: 'Challenge fingerprint mismatch' });
+    }
+
+    // 2. Authenticate Admin Credentials
+    if (!adminIdentifier && !adminPin) {
+      return res.status(400).json({ success: false, error: 'Administrator Username/Password or Master PIN required' });
+    }
+
+    let adminUser = null;
+    if (adminPin) {
+      adminUser = queryOne('SELECT * FROM users WHERE pin = ? AND is_active = 1', [String(adminPin).trim()]);
+    } else if (adminIdentifier) {
+      const cleanIdent = String(adminIdentifier).trim().toLowerCase();
+      adminUser = queryOne(
+        'SELECT * FROM users WHERE (LOWER(email) = ? OR LOWER(username) = ?) AND is_active = 1',
+        [cleanIdent, cleanIdent]
+      );
+      if (adminUser && adminUser.password_hash !== adminPassword) {
+        return res.status(401).json({ success: false, error: 'Incorrect administrator password' });
+      }
+    }
+
+    if (!adminUser) {
+      return res.status(401).json({ success: false, error: 'Administrator credentials not found or invalid' });
+    }
+
+    // 3. STRICT RBAC CHECK: Caller MUST be role 'admin'
+    if (adminUser.role !== 'admin') {
+      logDeviceAudit(null, adminUser.id, 'UNAUTHORIZED_TERMINAL_ELEVATION_ATTEMPT', `User ${adminUser.name} (${adminUser.role}) attempted to elevate terminal without admin privileges`, req.ip);
+      return res.status(403).json({
+        success: false,
+        error: 'Only an authorized administrator or restaurant owner can authorize terminal permissions.',
+      });
+    }
+
+    // 4. Verify Cryptographic Proof of Device Possession
+    if (!publicKeySpki || !signature) {
+      return res.status(400).json({ success: false, error: 'Device public key and cryptographic signature required' });
+    }
+
+    let isSignatureValid = false;
+    try {
+      const pubKeyDer = Buffer.from(publicKeySpki, 'base64');
+      const pubKey = crypto.createPublicKey({
+        key: pubKeyDer,
+        format: 'der',
+        type: 'spki',
+      });
+
+      isSignatureValid = crypto.verify(
+        'SHA256',
+        Buffer.from(challenge.nonce),
+        { key: pubKey, dsaEncoding: 'ieee-p1363' },
+        Buffer.from(signature, 'base64')
+      );
+    } catch (cryptoErr) {
+      console.error('Signature verification error:', cryptoErr);
+      isSignatureValid = false;
+    }
+
+    if (!isSignatureValid) {
+      return res.status(401).json({
+        success: false,
+        error: 'Cryptographic device signature verification failed.',
+      });
+    }
+
+    // 5. Update Device Roles in Database
+    let device = queryOne('SELECT * FROM authorized_devices WHERE device_fingerprint_hash = ?', [deviceFingerprint]);
+    const now = new Date().toISOString();
+    const finalRoles = Array.isArray(rolesToAuthorize) && rolesToAuthorize.length > 0
+      ? rolesToAuthorize
+      : ['admin', 'cashier', 'order_taker'];
+
+    let deviceId = device ? device.id : 'dev-' + Date.now();
+    const finalName = deviceName && deviceName.trim() ? deviceName.trim() : (device ? device.device_name : 'Admin Terminal');
+
+    let refreshedRoles = finalRoles;
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    const sessionId = 'ses-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    transaction(() => {
+      if (device) {
+        // Merge with existing roles to avoid losing prior permissions
+        const existingRoles = parseRoles(device.permitted_roles);
+        refreshedRoles = Array.from(new Set([...existingRoles, ...finalRoles]));
+
+        run(
+          `UPDATE authorized_devices 
+           SET status = 'approved',
+               permitted_roles = ?,
+               device_name = COALESCE(?, device_name),
+               assigned_user_id = NULL,
+               approved_by = ?,
+               approved_at = ?,
+               revoked_by = NULL,
+               revoked_at = NULL,
+               last_active_at = ?
+           WHERE id = ?`,
+          [JSON.stringify(refreshedRoles), deviceName || null, adminUser.name, now, now, device.id]
+        );
+        logDeviceAudit(device.id, adminUser.id, 'DEVICE_OWNER_AUTHORIZED', `Terminal '${device.device_name}' elevated by Admin ${adminUser.name} to [${refreshedRoles.join(', ')}]`, req.ip);
+      } else {
+        run(
+          `INSERT INTO authorized_devices 
+           (id, device_fingerprint_hash, device_name, assigned_user_id, permitted_roles, status, approved_by, approved_at, last_active_at, created_at)
+           VALUES (?, ?, ?, NULL, ?, 'approved', ?, ?, ?, ?)`,
+          [deviceId, deviceFingerprint, finalName, JSON.stringify(finalRoles), adminUser.name, now, now, now]
+        );
+        run(
+          `INSERT INTO device_credentials (id, device_id, public_key_spki, algorithm, key_format, created_at)
+           VALUES (?, ?, ?, 'ECDSA-P256', 'spki', ?)`,
+          ['cred-' + Date.now(), deviceId, publicKeySpki, now]
+        );
+        logDeviceAudit(deviceId, adminUser.id, 'DEVICE_OWNER_REGISTERED', `New terminal authorized directly by Admin ${adminUser.name} for [${finalRoles.join(', ')}]`, req.ip);
+      }
+
+      // Invalidate old sessions for this user on this device
+      run('UPDATE device_sessions SET is_valid = 0 WHERE device_id = ? AND user_id = ?', [deviceId, adminUser.id]);
+
+      // Create new active session
+      run(
+        `INSERT INTO device_sessions (id, device_id, user_id, session_token, expires_at, last_seen_at, is_valid, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+        [sessionId, deviceId, adminUser.id, sessionToken, expiresAt, now, now]
+      );
+    });
+
+    const refreshed = queryOne('SELECT * FROM authorized_devices WHERE id = ?', [deviceId]);
+    const { password_hash, ...safeAdmin } = adminUser;
+
+    res.json({
+      success: true,
+      data: {
+        user: safeAdmin,
+        sessionToken,
+        device: {
+          id: refreshed.id,
+          name: refreshed.device_name,
+          permittedRoles: refreshedRoles,
+          status: 'approved',
+          lastActiveAt: now,
+        },
+      },
+      message: `Terminal successfully authorized for Administrator access by ${adminUser.name}!`,
+    });
+  } catch (err) {
+    console.error('Owner authorize error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// 2c. POST /api/device/dev/authorize-local-terminal
+// Development-Only local terminal authorization
+// Disabled in production
+// -------------------------------------------------------------
+router.post('/dev/authorize-local-terminal', (req, res) => {
+  try {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ success: false, error: 'Development endpoint is disabled in production' });
+    }
+
+    const { deviceFingerprint } = req.body;
+    if (!deviceFingerprint) {
+      return res.status(400).json({ success: false, error: 'deviceFingerprint is required' });
+    }
+
+    const device = queryOne('SELECT * FROM authorized_devices WHERE device_fingerprint_hash = ?', [deviceFingerprint]);
+    if (!device) {
+      return res.status(404).json({ success: false, error: 'Device not found' });
+    }
+
+    const now = new Date().toISOString();
+    const elevatedRoles = ['admin', 'cashier', 'order_taker'];
+
+    transaction(() => {
+      run(
+        `UPDATE authorized_devices 
+         SET status = 'approved',
+             permitted_roles = ?,
+             assigned_user_id = NULL,
+             approved_by = 'Dev Local Host',
+             approved_at = ?,
+             revoked_by = NULL,
+             revoked_at = NULL,
+             last_active_at = ?
+         WHERE id = ?`,
+        [JSON.stringify(elevatedRoles), now, now, device.id]
+      );
+
+      run(
+        `UPDATE device_approval_requests 
+         SET status = 'approved', reviewed_by = 'Dev Local Host', reviewed_at = ? 
+         WHERE device_id = ?`,
+        [now, device.id]
+      );
+
+      logDeviceAudit(device.id, null, 'DEV_LOCAL_AUTHORIZED', `Local terminal elevated to [${elevatedRoles.join(', ')}] in dev mode`, req.ip);
+    });
+
+    res.json({
+      success: true,
+      message: `Local terminal '${device.device_name}' authorized for [${elevatedRoles.join(', ')}].`,
+      permittedRoles: elevatedRoles,
+    });
+  } catch (err) {
+    console.error('Dev authorize error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
 // 3. GET /api/device/status/:fingerprint
 // Allows client to poll/check authorization state
 // -------------------------------------------------------------
