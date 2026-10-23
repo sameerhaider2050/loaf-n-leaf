@@ -1,9 +1,10 @@
 import { 
   Product, Category, RestaurantTable, Order, Settings, 
   ReceiptData, SalesReportSummary, OrderStatus, TableStatus,
-  User, StaffMember
+  User, StaffMember, AuthorizedDevice, DeviceAuditLog, DevicePolicySettings
 } from '../types';
 import { fallbackStore } from './fallbackStore';
+import { deviceCrypto } from './deviceCrypto';
 
 const BASE_URL = '/api';
 let isLocalFallback = false;
@@ -15,12 +16,18 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
 
   try {
     const url = `${BASE_URL}${endpoint}`;
+    const session = deviceCrypto.getStoredSession();
+    const reqHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options?.headers as Record<string, string> || {}),
+    };
+    if (session?.sessionToken) {
+      reqHeaders['x-device-session-token'] = session.sessionToken;
+    }
+
     const response = await fetch(url, {
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options?.headers || {}),
-      },
       ...options,
+      headers: reqHeaders,
     });
 
     const contentType = response.headers.get('content-type') || '';
@@ -31,7 +38,14 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
 
     const data = await response.json();
     if (!response.ok || data.success === false) {
-      throw new Error(data.error || `HTTP error ${response.status}`);
+      if (data.code === 'DEVICE_REVOKED') {
+        window.dispatchEvent(new CustomEvent('lnl_device_revoked', { detail: data }));
+      }
+      const err: any = new Error(data.error || data.message || `HTTP error ${response.status}`);
+      err.code = data.code;
+      err.status = data.status;
+      err.data = data;
+      throw err;
     }
     return data.data !== undefined ? data.data : data;
   } catch (err: any) {
@@ -410,6 +424,158 @@ export const api = {
       const orders = fallbackStore.getOrders();
       const active = orders.find(o => o.table_number === tableNumber && (o.status === 'pending' || o.status === 'preparing' || o.status === 'ready'));
       return { active_order: active || null };
+    }
+  },
+
+  // -------------------------------------------------------------
+  // Cryptographic Device Authentication & Authorization
+  // -------------------------------------------------------------
+  async getDeviceChallenge(deviceFingerprint: string): Promise<{ challengeId: string; nonce: string; timestamp: number; expiresIn: number }> {
+    try {
+      return await request<{ challengeId: string; nonce: string; timestamp: number; expiresIn: number }>('/device/challenge', {
+        method: 'POST',
+        body: JSON.stringify({ deviceFingerprint }),
+      });
+    } catch (err) {
+      return fallbackStore.getDeviceChallenge(deviceFingerprint);
+    }
+  },
+
+  async verifyDeviceAndLogin(payload: {
+    identifier?: string;
+    password?: string;
+    pin?: string;
+    deviceFingerprint: string;
+    publicKeySpki: string;
+    challengeId: string;
+    signature: string;
+    deviceName: string;
+    deviceInfo?: any;
+    requestedRole?: string;
+  }): Promise<{ user: User; sessionToken: string; device: any }> {
+    try {
+      return await request<{ user: User; sessionToken: string; device: any }>('/device/verify-and-login', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (err: any) {
+      if (err?.message === 'FALLBACK_MODE' || isLocalFallback) {
+        return fallbackStore.verifyDeviceAndLogin(payload);
+      }
+      throw err;
+    }
+  },
+
+  async getDeviceStatus(fingerprint: string): Promise<any> {
+    try {
+      return await request<any>(`/device/status/${fingerprint}`);
+    } catch {
+      return fallbackStore.getDeviceStatus(fingerprint);
+    }
+  },
+
+  async requestDeviceApproval(payload: {
+    deviceFingerprint: string;
+    deviceName?: string;
+    notes?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    try {
+      return await request<{ success: boolean; message: string }>('/device/request-approval', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      return fallbackStore.requestDeviceApproval(payload);
+    }
+  },
+
+  // Admin Device Management
+  async getAdminDevices(): Promise<AuthorizedDevice[]> {
+    try {
+      return await request<AuthorizedDevice[]>('/device/admin/devices');
+    } catch {
+      return fallbackStore.getAdminDevices();
+    }
+  },
+
+  async approveDevice(id: string, payload: {
+    assignedUserId?: string;
+    permittedRoles: string[];
+    adminName?: string;
+    deviceName?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    try {
+      return await request<{ success: boolean; message: string }>(`/device/admin/devices/${id}/approve`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      return fallbackStore.approveDevice(id, payload);
+    }
+  },
+
+  async rejectDevice(id: string, payload: {
+    reason?: string;
+    adminName?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    try {
+      return await request<{ success: boolean; message: string }>(`/device/admin/devices/${id}/reject`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      return fallbackStore.rejectDevice(id, payload);
+    }
+  },
+
+  async revokeDevice(id: string, payload: {
+    reason?: string;
+    adminName?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    try {
+      return await request<{ success: boolean; message: string }>(`/device/admin/devices/${id}/revoke`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      return fallbackStore.revokeDevice(id, payload);
+    }
+  },
+
+  async deleteDevice(id: string): Promise<{ success: boolean; message: string }> {
+    try {
+      return await request<{ success: boolean; message: string }>(`/device/admin/devices/${id}`, {
+        method: 'DELETE',
+      });
+    } catch {
+      return fallbackStore.deleteDevice(id);
+    }
+  },
+
+  async getDeviceAuditLogs(): Promise<DeviceAuditLog[]> {
+    try {
+      return await request<DeviceAuditLog[]>('/device/admin/audit-logs');
+    } catch {
+      return fallbackStore.getDeviceAuditLogs();
+    }
+  },
+
+  async getDevicePolicySettings(): Promise<DevicePolicySettings> {
+    try {
+      return await request<DevicePolicySettings>('/device/admin/settings');
+    } catch {
+      return fallbackStore.getDevicePolicySettings();
+    }
+  },
+
+  async updateDevicePolicySettings(maxDevicesPerEmployee: number): Promise<{ success: boolean; message: string }> {
+    try {
+      return await request<{ success: boolean; message: string }>('/device/admin/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ maxDevicesPerEmployee }),
+      });
+    } catch {
+      return fallbackStore.updateDevicePolicySettings(maxDevicesPerEmployee);
     }
   },
 };

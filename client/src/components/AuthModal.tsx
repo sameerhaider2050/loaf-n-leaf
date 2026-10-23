@@ -10,14 +10,23 @@ import {
   Sparkles,
   ShoppingBag
 } from 'lucide-react';
-import { User, UserRole } from '../types';
+import { User, UserRole, DeviceStatus } from '../types';
 import { api } from '../services/api';
+import { deviceCrypto, getDevicePlatformInfo } from '../services/deviceCrypto';
 
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentUser: User | null;
   onLoginSuccess: (user: User) => void;
+  onDeviceBlocked?: (blockInfo: {
+    status: DeviceStatus | 'role_mismatch';
+    fingerprint: string;
+    message: string;
+    permittedRoles?: string[];
+    userRole?: string;
+    deviceName?: string;
+  }) => void;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
@@ -25,6 +34,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onClose,
   currentUser,
   onLoginSuccess,
+  onDeviceBlocked,
 }) => {
   const [activeTab, setActiveTab] = useState<'staff' | 'customer' | 'signup'>('staff');
   
@@ -50,6 +60,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     { role: 'admin' as UserRole, name: 'Admin (Manager)', pin: '1234', pass: 'admin123', email: 'admin@loafnleaf.com' },
     { role: 'cashier' as UserRole, name: 'Ahmed Khan (Cashier)', pin: '5678', pass: 'cashier123', email: 'cashier@loafnleaf.com' },
     { role: 'cashier' as UserRole, name: 'Sara Malik (Cashier 2)', pin: '4321', pass: 'cashier123', email: 'sara@loafnleaf.com' },
+    { role: 'order_taker' as UserRole, name: 'Hamza Tariq (Waiter)', pin: '7890', pass: 'waiter123', email: 'waiter@loafnleaf.com' },
   ];
 
   const handleQuickFill = (acc: typeof demoAccounts[0]) => {
@@ -64,13 +75,70 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       setIsLoading(true);
       setErrorMessage('');
-      const credentials = usePinMode
-        ? { pin: pinInput.trim() }
-        : { identifier: identifier.trim(), password: password.trim() };
 
-      const user = await api.login(credentials);
-      onLoginSuccess(user);
-      onClose();
+      // 1. Retrieve or generate non-extractable device cryptographic keypair
+      const { identity } = await deviceCrypto.getOrCreateDeviceIdentity();
+
+      // 2. Request single-use challenge nonce from server
+      const challenge = await api.getDeviceChallenge(identity.fingerprint);
+
+      // 3. Cryptographically sign challenge nonce with private key
+      const signature = await deviceCrypto.signChallenge(challenge.nonce);
+
+      // 4. Verify employee credentials + device cryptographic proof on backend
+      const platformInfo = getDevicePlatformInfo();
+      const payload = {
+        ...(usePinMode ? { pin: pinInput.trim() } : { identifier: identifier.trim(), password: password.trim() }),
+        deviceFingerprint: identity.fingerprint,
+        publicKeySpki: identity.publicKeySpki,
+        challengeId: challenge.challengeId,
+        signature,
+        deviceName: identity.deviceName,
+        deviceInfo: platformInfo,
+      };
+
+      try {
+        const result = await api.verifyDeviceAndLogin(payload);
+
+        // Store session token
+        deviceCrypto.saveSession({
+          sessionToken: result.sessionToken,
+          deviceId: result.device.id,
+          deviceName: result.device.name,
+          permittedRoles: result.device.permittedRoles,
+          user: result.user,
+          savedAt: new Date().toISOString(),
+        });
+
+        onLoginSuccess(result.user);
+        onClose();
+      } catch (authErr: any) {
+        const errCode = authErr.code || (authErr.data && authErr.data.code);
+        if (
+          errCode === 'DEVICE_UNAUTHORIZED' ||
+          errCode === 'DEVICE_PENDING_APPROVAL' ||
+          errCode === 'DEVICE_REJECTED' ||
+          errCode === 'DEVICE_REVOKED' ||
+          errCode === 'DEVICE_ROLE_MISMATCH' ||
+          authErr.status === 'pending' ||
+          authErr.status === 'revoked' ||
+          authErr.status === 'rejected'
+        ) {
+          onClose();
+          if (onDeviceBlocked) {
+            onDeviceBlocked({
+              status: authErr.status || (errCode === 'DEVICE_ROLE_MISMATCH' ? 'role_mismatch' : 'pending'),
+              fingerprint: identity.fingerprint,
+              message: authErr.message || authErr.error || 'Device authorization required',
+              permittedRoles: authErr.permittedRoles || authErr.data?.permittedRoles,
+              userRole: authErr.userRole || authErr.data?.userRole,
+              deviceName: identity.deviceName,
+            });
+          }
+          return;
+        }
+        throw authErr;
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Login failed. Please check credentials.');
     } finally {

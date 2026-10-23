@@ -139,15 +139,81 @@ function initSchema() {
       username TEXT UNIQUE,
       password_hash TEXT NOT NULL,
       pin TEXT,
-      role TEXT NOT NULL DEFAULT 'cashier', -- 'admin', 'cashier', 'customer'
+      role TEXT NOT NULL DEFAULT 'cashier', -- 'admin', 'cashier', 'order_taker'
       phone TEXT,
       avatar TEXT,
       is_active INTEGER DEFAULT 1,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS authorized_devices (
+      id TEXT PRIMARY KEY,
+      device_fingerprint_hash TEXT UNIQUE NOT NULL,
+      device_name TEXT NOT NULL,
+      assigned_user_id TEXT,
+      permitted_roles TEXT NOT NULL, -- JSON array string e.g. '["cashier"]'
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'approved', 'rejected', 'revoked'
+      device_info TEXT, -- JSON or string with OS, browser, user agent
+      ip_address TEXT,
+      last_active_at TEXT,
+      approved_by TEXT,
+      approved_at TEXT,
+      revoked_by TEXT,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (assigned_user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS device_credentials (
+      id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL,
+      public_key_spki TEXT NOT NULL,
+      algorithm TEXT NOT NULL DEFAULT 'ECDSA-P256',
+      key_format TEXT NOT NULL DEFAULT 'spki',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (device_id) REFERENCES authorized_devices(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS device_approval_requests (
+      id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      requested_role TEXT NOT NULL,
+      device_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'approved', 'rejected'
+      admin_notes TEXT,
+      reviewed_by TEXT,
+      reviewed_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (device_id) REFERENCES authorized_devices(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS device_sessions (
+      id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      session_token TEXT UNIQUE NOT NULL,
+      expires_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      is_valid INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (device_id) REFERENCES authorized_devices(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS device_audit_logs (
+      id TEXT PRIMARY KEY,
+      device_id TEXT,
+      user_id TEXT,
+      action TEXT NOT NULL,
+      details TEXT,
+      ip_address TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
 
-  // Ensure default staff and admin exist
+  // Ensure default staff, waiter, and admin exist
   ensureDefaultUsers();
 
   // Check if initial categories and products exist
@@ -213,9 +279,10 @@ function transaction(callback) {
 
 function ensureDefaultUsers() {
   const userCount = queryOne('SELECT COUNT(*) as count FROM users');
+  const now = new Date().toISOString();
+  
   if (!userCount || userCount.count === 0) {
-    console.log('Seeding default Admin, Cashier, and Customer accounts for Loaf n Leaf...');
-    const now = new Date().toISOString();
+    console.log('Seeding default Admin, Cashier, and Waiter accounts for Loaf n Leaf...');
     
     // Default Admin (password: admin123, pin: 1234)
     db.run(
@@ -238,13 +305,31 @@ function ensureDefaultUsers() {
       ['usr-cashier-2', 'Sara Malik (Shift 2)', 'sara@loafnleaf.com', 'cashier2', 'cashier123', '4321', 'cashier', '+92 302 5551234', '', 1, now]
     );
 
-    // Demo Customer
+    // Default Waiter / Order Taker (password: waiter123, pin: 7890)
     db.run(
       `INSERT INTO users (id, name, email, username, password_hash, pin, role, phone, avatar, is_active, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ['usr-cust-1', 'Zainab Tariq', 'zainab.tariq@gmail.com', 'zainab', 'google_user', '', 'customer', '+92 333 4445566', '', 1, now]
+      ['usr-waiter-1', 'Hamza Tariq (Waiter)', 'waiter@loafnleaf.com', 'waiter1', 'waiter123', '7890', 'order_taker', '+92 333 1122334', '', 1, now]
     );
 
+    saveToDisk();
+  } else {
+    // If database exists, verify waiter user is present
+    const waiter = queryOne("SELECT id FROM users WHERE role = 'order_taker'");
+    if (!waiter) {
+      db.run(
+        `INSERT INTO users (id, name, email, username, password_hash, pin, role, phone, avatar, is_active, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ['usr-waiter-1', 'Hamza Tariq (Waiter)', 'waiter@loafnleaf.com', 'waiter1', 'waiter123', '7890', 'order_taker', '+92 333 1122334', '', 1, now]
+      );
+      saveToDisk();
+    }
+  }
+
+  // Ensure default device settings
+  const maxDevSetting = queryOne("SELECT value FROM settings WHERE key = 'max_devices_per_employee'");
+  if (!maxDevSetting) {
+    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('max_devices_per_employee', '2')");
     saveToDisk();
   }
 }

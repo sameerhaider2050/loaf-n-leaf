@@ -13,6 +13,7 @@ const settingsRouter = require('./routes/settings');
 const authRouter = require('./routes/auth');
 const staffRouter = require('./routes/staff');
 const customerOrdersRouter = require('./routes/customerOrders');
+const deviceAuthRouter = require('./routes/deviceAuth');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -31,6 +32,7 @@ app.use('/api/settings', settingsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/staff', staffRouter);
 app.use('/api/customer/orders', customerOrdersRouter);
+app.use('/api/device', deviceAuthRouter);
 
 app.get('/api/health', (req, res) => {
   res.json({

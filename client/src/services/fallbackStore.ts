@@ -1,6 +1,7 @@
 import { 
   Product, Category, RestaurantTable, Order, Settings, 
-  ReceiptData, SalesReportSummary, User, StaffMember, OrderStatus 
+  ReceiptData, SalesReportSummary, User, StaffMember, OrderStatus,
+  AuthorizedDevice, DeviceAuditLog, DevicePolicySettings
 } from '../types';
 
 const STORAGE_KEY_PRODUCTS = 'loafnleaf_products';
@@ -8,6 +9,9 @@ const STORAGE_KEY_ORDERS = 'loafnleaf_orders';
 const STORAGE_KEY_TABLES = 'loafnleaf_tables';
 const STORAGE_KEY_SETTINGS = 'loafnleaf_settings';
 const STORAGE_KEY_STAFF = 'loafnleaf_staff';
+const STORAGE_KEY_DEVICES = 'loafnleaf_devices';
+const STORAGE_KEY_DEVICE_AUDIT = 'loafnleaf_device_audit';
+const STORAGE_KEY_DEVICE_POLICY = 'loafnleaf_device_policy';
 
 const defaultCategories: Category[] = [
   { id: 'cat-1', name: 'All Items', slug: 'all', sort_order: 0 },
@@ -53,6 +57,7 @@ const defaultStaff: StaffMember[] = [
   { id: 'usr-admin-1', name: 'Restaurant Admin', email: 'admin@loafnleaf.com', username: 'admin', role: 'admin', pin: '1234', phone: '+92 300 1234567', is_active: 1, created_at: new Date().toISOString() },
   { id: 'usr-cashier-1', name: 'Ahmed Khan (Cashier)', email: 'cashier@loafnleaf.com', username: 'cashier1', role: 'cashier', pin: '5678', phone: '+92 301 9876543', is_active: 1, created_at: new Date().toISOString() },
   { id: 'usr-cashier-2', name: 'Sara Malik (Shift 2)', email: 'sara@loafnleaf.com', username: 'cashier2', role: 'cashier', pin: '4321', phone: '+92 302 5551234', is_active: 1, created_at: new Date().toISOString() },
+  { id: 'usr-waiter-1', name: 'Hamza Tariq (Waiter)', email: 'waiter@loafnleaf.com', username: 'waiter1', role: 'order_taker', pin: '7890', phone: '+92 333 1122334', is_active: 1, created_at: new Date().toISOString() },
 ];
 
 function getStored<T>(key: string, fallback: T): T {
@@ -471,5 +476,232 @@ export const fallbackStore = {
       avatar: profile.avatar,
       is_active: 1,
     };
+  },
+
+  // -------------------------------------------------------------
+  // Fallback Device Management (for offline/Netlify preview)
+  // -------------------------------------------------------------
+  getDeviceChallenge(deviceFingerprint: string) {
+    return {
+      challengeId: 'fall-chal-' + Date.now(),
+      nonce: 'nonce-' + Math.random().toString(36).substring(2) + Date.now(),
+      timestamp: Date.now(),
+      expiresIn: 60,
+    };
+  },
+
+  getAdminDevices(): AuthorizedDevice[] {
+    return getStored<AuthorizedDevice[]>(STORAGE_KEY_DEVICES, []);
+  },
+
+  getDeviceStatus(fingerprint: string): any {
+    const devices = this.getAdminDevices();
+    const dev = devices.find(d => d.device_fingerprint_hash === fingerprint);
+    if (!dev) {
+      return { status: 'unregistered' };
+    }
+    return dev;
+  },
+
+  verifyDeviceAndLogin(payload: any): { user: User; sessionToken: string; device: any } {
+    const devices = this.getAdminDevices();
+    const staff = this.getStaffMembers();
+
+    // Authenticate employee
+    let user: User | null = null;
+    if (payload.pin) {
+      const match = staff.find(s => s.pin === payload.pin);
+      if (match) {
+        user = {
+          id: match.id,
+          name: match.name,
+          email: match.email,
+          username: match.username,
+          role: match.role as any,
+          phone: match.phone,
+          is_active: match.is_active,
+        };
+      }
+    } else if (payload.identifier) {
+      const clean = payload.identifier.trim().toLowerCase();
+      const match = staff.find(s => s.email.toLowerCase() === clean || s.username.toLowerCase() === clean);
+      if (match) {
+        user = {
+          id: match.id,
+          name: match.name,
+          email: match.email,
+          username: match.username,
+          role: match.role as any,
+          phone: match.phone,
+          is_active: match.is_active,
+        };
+      }
+    }
+
+    if (!user) {
+      throw new Error('Invalid employee credentials');
+    }
+
+    // Check device authorization
+    let dev = devices.find(d => d.device_fingerprint_hash === payload.deviceFingerprint);
+    const now = new Date().toISOString();
+
+    if (!dev) {
+      const newDev: AuthorizedDevice = {
+        id: 'dev-' + Date.now(),
+        device_fingerprint_hash: payload.deviceFingerprint,
+        device_name: payload.deviceName || 'Terminal ' + payload.deviceFingerprint.substring(0, 6).toUpperCase(),
+        assigned_user_id: user.id,
+        assigned_employee_name: user.name,
+        permitted_roles: [user.role],
+        status: 'pending',
+        ip_address: '127.0.0.1',
+        last_active_at: now,
+        created_at: now,
+      };
+      devices.push(newDev);
+      setStored(STORAGE_KEY_DEVICES, devices);
+
+      const err: any = new Error('Device approval required. Administrator has been notified.');
+      err.code = 'DEVICE_UNAUTHORIZED';
+      err.status = 'pending';
+      throw err;
+    }
+
+    if (dev.status === 'pending') {
+      const err: any = new Error('This device is awaiting administrator authorization.');
+      err.code = 'DEVICE_PENDING_APPROVAL';
+      err.status = 'pending';
+      throw err;
+    }
+
+    if (dev.status === 'rejected') {
+      const err: any = new Error('This device has been rejected by an administrator.');
+      err.code = 'DEVICE_REJECTED';
+      err.status = 'rejected';
+      throw err;
+    }
+
+    if (dev.status === 'revoked') {
+      const err: any = new Error('This device authorization has been revoked.');
+      err.code = 'DEVICE_REVOKED';
+      err.status = 'revoked';
+      throw err;
+    }
+
+    // RBAC + Device Permissions Matrix
+    const permittedRoles = dev.permitted_roles || [];
+    const targetRole = payload.requestedRole || user.role;
+    if (!permittedRoles.includes(targetRole) && !permittedRoles.includes('*')) {
+      const err: any = new Error(`Device authorized only for [${permittedRoles.join(', ')}]. Role '${targetRole}' is not permitted.`);
+      err.code = 'DEVICE_ROLE_MISMATCH';
+      throw err;
+    }
+
+    // Update last active
+    dev.last_active_at = now;
+    setStored(STORAGE_KEY_DEVICES, devices);
+
+    return {
+      user,
+      sessionToken: 'fall-ses-' + Date.now(),
+      device: dev,
+    };
+  },
+
+  requestDeviceApproval(payload: any): { success: boolean; message: string } {
+    const devices = this.getAdminDevices();
+    const dev = devices.find(d => d.device_fingerprint_hash === payload.deviceFingerprint);
+    if (dev && payload.deviceName) {
+      dev.device_name = payload.deviceName;
+      setStored(STORAGE_KEY_DEVICES, devices);
+    }
+    return { success: true, message: 'Device approval request updated' };
+  },
+
+  approveDevice(id: string, payload: any): { success: boolean; message: string } {
+    const devices = this.getAdminDevices();
+    const dev = devices.find(d => d.id === id);
+    if (!dev) throw new Error('Device not found');
+
+    const staff = this.getStaffMembers();
+    const assigned = staff.find(s => s.id === payload.assignedUserId);
+
+    dev.status = 'approved';
+    dev.assigned_user_id = payload.assignedUserId || null;
+    dev.assigned_employee_name = assigned?.name || 'All Authorized Staff';
+    dev.permitted_roles = payload.permittedRoles || ['order_taker'];
+    dev.approved_by = payload.adminName || 'Admin';
+    dev.approved_at = new Date().toISOString();
+    dev.revoked_by = undefined;
+    dev.revoked_at = undefined;
+
+    setStored(STORAGE_KEY_DEVICES, devices);
+    this.addAuditLog(dev.id, dev.assigned_user_id, 'DEVICE_APPROVED', `Device approved with roles [${dev.permitted_roles.join(', ')}]`);
+    return { success: true, message: `Device '${dev.device_name}' approved successfully` };
+  },
+
+  rejectDevice(id: string, payload: any): { success: boolean; message: string } {
+    const devices = this.getAdminDevices();
+    const dev = devices.find(d => d.id === id);
+    if (!dev) throw new Error('Device not found');
+
+    dev.status = 'rejected';
+    setStored(STORAGE_KEY_DEVICES, devices);
+    this.addAuditLog(dev.id, null, 'DEVICE_REJECTED', payload.reason || 'Rejected by administrator');
+    return { success: true, message: `Device '${dev.device_name}' rejected` };
+  },
+
+  revokeDevice(id: string, payload: any): { success: boolean; message: string } {
+    const devices = this.getAdminDevices();
+    const dev = devices.find(d => d.id === id);
+    if (!dev) throw new Error('Device not found');
+
+    dev.status = 'revoked';
+    dev.revoked_by = payload.adminName || 'Admin';
+    dev.revoked_at = new Date().toISOString();
+    setStored(STORAGE_KEY_DEVICES, devices);
+    this.addAuditLog(dev.id, dev.assigned_user_id, 'DEVICE_REVOKED', `Device revoked: ${payload.reason || 'Admin decision'}`);
+    return { success: true, message: `Device '${dev.device_name}' revoked. All sessions invalidated.` };
+  },
+
+  deleteDevice(id: string): { success: boolean; message: string } {
+    let devices = this.getAdminDevices();
+    const dev = devices.find(d => d.id === id);
+    devices = devices.filter(d => d.id !== id);
+    setStored(STORAGE_KEY_DEVICES, devices);
+    this.addAuditLog(id, null, 'DEVICE_DELETED', `Device ${dev?.device_name || id} removed from registry`);
+    return { success: true, message: 'Device deleted' };
+  },
+
+  getDeviceAuditLogs(): DeviceAuditLog[] {
+    return getStored<DeviceAuditLog[]>(STORAGE_KEY_DEVICE_AUDIT, []);
+  },
+
+  addAuditLog(deviceId: string | null, userId: string | null, action: string, details?: string): void {
+    const logs = this.getDeviceAuditLogs();
+    const staff = this.getStaffMembers();
+    const user = staff.find(s => s.id === userId);
+    logs.unshift({
+      id: 'aud-' + Date.now(),
+      device_id: deviceId,
+      user_id: userId,
+      user_name: user?.name,
+      action,
+      details,
+      ip_address: '127.0.0.1',
+      created_at: new Date().toISOString(),
+    });
+    setStored(STORAGE_KEY_DEVICE_AUDIT, logs.slice(0, 100));
+  },
+
+  getDevicePolicySettings(): DevicePolicySettings {
+    return getStored<DevicePolicySettings>(STORAGE_KEY_DEVICE_POLICY, { maxDevicesPerEmployee: 2 });
+  },
+
+  updateDevicePolicySettings(maxDevicesPerEmployee: number): { success: boolean; message: string } {
+    const settings = { maxDevicesPerEmployee: Math.max(1, maxDevicesPerEmployee) };
+    setStored(STORAGE_KEY_DEVICE_POLICY, settings);
+    return { success: true, message: `Policy updated: max ${settings.maxDevicesPerEmployee} devices per employee` };
   },
 };

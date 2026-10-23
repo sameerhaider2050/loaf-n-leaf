@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { User, UserRole } from '../types';
 
-export type NavTab = 'counter' | 'orders' | 'menu' | 'tables' | 'qr' | 'staff' | 'reports' | 'customer_menu' | 'settings';
+export type NavTab = 'counter' | 'orders' | 'menu' | 'tables' | 'qr' | 'staff' | 'devices' | 'reports' | 'customer_menu' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -50,6 +50,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'tables', label: 'Table Seating', icon: <Grid2X2 className="w-4 h-4" /> },
     { id: 'qr', label: 'Table QR Standees', icon: <QrCode className="w-4 h-4 text-amber-400" />, badge: 'Barcodes' },
     { id: 'staff', label: 'Staff & Passwords', icon: <ShieldAlert className="w-4 h-4" />, adminOnly: true },
+    { id: 'devices', label: 'Authorized Devices', icon: <Smartphone className="w-4 h-4 text-emerald-400" />, adminOnly: true },
     { id: 'reports', label: 'Sales & Revenue', icon: <BarChart3 className="w-4 h-4" />, adminOnly: true },
     { id: 'customer_menu', label: 'Digital Guest Menu', icon: <Smartphone className="w-4 h-4 text-emerald-400" />, badge: 'QR View' },
     { id: 'settings', label: 'Settings', icon: <SettingsIcon className="w-4 h-4" />, adminOnly: true },

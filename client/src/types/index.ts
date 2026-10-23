@@ -160,7 +160,7 @@ export interface SalesReportSummary {
   recentOrders: Order[];
 }
 
-export type UserRole = 'admin' | 'cashier' | 'customer';
+export type UserRole = 'admin' | 'cashier' | 'order_taker' | 'customer';
 
 export interface User {
   id: string;
@@ -180,9 +180,61 @@ export interface StaffMember {
   name: string;
   email: string;
   username: string;
-  role: 'admin' | 'cashier';
+  role: 'admin' | 'cashier' | 'order_taker';
   pin?: string;
   phone?: string;
   is_active: number;
   created_at: string;
+}
+
+// Device-Based Access Control Types
+export type DeviceStatus = 'pending' | 'approved' | 'rejected' | 'revoked';
+
+export interface AuthorizedDevice {
+  id: string;
+  device_fingerprint_hash: string;
+  device_name: string;
+  assigned_user_id: string | null;
+  assigned_employee_name?: string;
+  assigned_employee_role?: string;
+  permitted_roles: string[];
+  status: DeviceStatus;
+  device_info?: string;
+  ip_address?: string;
+  last_active_at?: string;
+  approved_by?: string;
+  approved_at?: string;
+  revoked_by?: string;
+  revoked_at?: string;
+  created_at: string;
+  active_sessions_count?: number;
+}
+
+export interface DeviceApprovalRequest {
+  id: string;
+  device_id: string;
+  user_id: string;
+  requested_role: string;
+  device_name: string;
+  status: 'pending' | 'approved' | 'rejected';
+  admin_notes?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  created_at: string;
+}
+
+export interface DeviceAuditLog {
+  id: string;
+  device_id: string | null;
+  device_name?: string;
+  user_id: string | null;
+  user_name?: string;
+  action: string;
+  details?: string;
+  ip_address?: string;
+  created_at: string;
+}
+
+export interface DevicePolicySettings {
+  maxDevicesPerEmployee: number;
 }

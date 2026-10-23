@@ -10,10 +10,13 @@ import { StaffView } from './views/StaffView';
 import { ReportsView } from './views/ReportsView';
 import { CustomerMenuView } from './views/CustomerMenuView';
 import { SettingsView } from './views/SettingsView';
+import { AuthorizedDevicesView } from './views/AuthorizedDevicesView';
 import { AuthModal } from './components/AuthModal';
+import { DeviceApprovalScreen } from './components/DeviceApprovalScreen';
 import { SplashIntro } from './components/SplashIntro';
-import { Product, Category, RestaurantTable, Settings, Order, User } from './types';
+import { Product, Category, RestaurantTable, Settings, Order, User, DeviceStatus } from './types';
 import { api } from './services/api';
+import { deviceCrypto } from './services/deviceCrypto';
 import { Loader2 } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -50,8 +53,73 @@ export const App: React.FC = () => {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [customerActiveTable, setCustomerActiveTable] = useState<string>('T-01');
 
+  // Device-Based Access Control State
+  const [deviceFingerprint, setDeviceFingerprint] = useState<string>('');
+  const [deviceBlockState, setDeviceBlockState] = useState<{
+    status: DeviceStatus | 'role_mismatch';
+    fingerprint: string;
+    message: string;
+    permittedRoles?: string[];
+    userRole?: string;
+    deviceName?: string;
+  } | null>(null);
+
   const [loading, setLoading] = useState<boolean>(true);
   const [activeOrderToLoad, setActiveOrderToLoad] = useState<Order | null>(null);
+
+  // Check device authorization and cryptographic identity on boot
+  useEffect(() => {
+    let isMounted = true;
+
+    const initDeviceAuth = async () => {
+      try {
+        const { identity } = await deviceCrypto.getOrCreateDeviceIdentity();
+        if (!isMounted) return;
+        setDeviceFingerprint(identity.fingerprint);
+
+        // Check if there is an existing session
+        const session = deviceCrypto.getStoredSession();
+        if (session && session.user) {
+          setCurrentUser(session.user);
+        }
+
+        // Verify device authorization status with backend
+        const devStatus = await api.getDeviceStatus(identity.fingerprint);
+        if (!isMounted) return;
+
+        if (devStatus && devStatus.status) {
+          if (devStatus.status === 'pending' || devStatus.status === 'revoked' || devStatus.status === 'rejected') {
+            setDeviceBlockState({
+              status: devStatus.status,
+              fingerprint: identity.fingerprint,
+              deviceName: devStatus.name || identity.deviceName,
+              message: devStatus.message || `Terminal is currently ${devStatus.status}.`,
+            });
+          }
+        }
+      } catch (err: any) {
+        console.error('Device authorization init error:', err);
+      }
+    };
+
+    initDeviceAuth();
+
+    // Listen to real-time device revocation events from API layer
+    const handleDeviceRevoked = (e: any) => {
+      deviceCrypto.clearSession();
+      setDeviceBlockState({
+        status: 'revoked',
+        fingerprint: deviceFingerprint,
+        message: e?.detail?.message || 'Terminal authorization has been revoked by an administrator.',
+      });
+    };
+
+    window.addEventListener('lnl_device_revoked', handleDeviceRevoked);
+    return () => {
+      isMounted = false;
+      window.removeEventListener('lnl_device_revoked', handleDeviceRevoked);
+    };
+  }, [deviceFingerprint]);
 
   // Check if opened via QR scan (#menu?table=T-03)
   useEffect(() => {
@@ -167,6 +235,28 @@ export const App: React.FC = () => {
     );
   }
 
+  // Device-Based Access Control Gate
+  if (deviceBlockState) {
+    return (
+      <DeviceApprovalScreen
+        status={deviceBlockState.status}
+        deviceFingerprint={deviceBlockState.fingerprint}
+        initialDeviceName={deviceBlockState.deviceName}
+        errorMessage={deviceBlockState.message}
+        permittedRoles={deviceBlockState.permittedRoles}
+        userRole={deviceBlockState.userRole}
+        onApproved={() => {
+          setDeviceBlockState(null);
+          loadInitialData();
+        }}
+        onBackToLogin={() => {
+          setDeviceBlockState(null);
+          setIsAuthModalOpen(true);
+        }}
+      />
+    );
+  }
+
   // If in pure customer digital menu mode (e.g. from customer mobile scan)
   if (activeTab === 'customer_menu' && currentUser?.role === 'customer') {
     return (
@@ -279,6 +369,10 @@ export const App: React.FC = () => {
             <StaffView />
           )}
 
+          {activeTab === 'devices' && (
+            <AuthorizedDevicesView currentAdminName={currentUser?.name} />
+          )}
+
           {activeTab === 'reports' && (
             <ReportsView />
           )}
@@ -314,6 +408,7 @@ export const App: React.FC = () => {
             setActiveTab('customer_menu');
           }
         }}
+        onDeviceBlocked={setDeviceBlockState}
       />
     </div>
   );
